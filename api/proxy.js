@@ -149,7 +149,14 @@ export default async function handler(req, res) {
 
   try {
     // 如果前端传了 dd 免登授权码，优先用用户身份
-    const authCode = req.query._ddAuthCode;
+    // ⚠️ 兼容两种传法：
+    //   - URL query: ?_ddAuthCode=xxx  (历史写法)
+    //   - HTTP header: x-dd-authcode: xxx  (新写法，避免 URL 编码/特殊字符问题)
+    const authCode =
+      req.query._ddAuthCode ||
+      req.headers['x-dd-authcode'] ||
+      req.headers['x-acs-dingtalk-authcode'] ||
+      '';
     let userInfo = null;
     if (authCode) {
       try {
