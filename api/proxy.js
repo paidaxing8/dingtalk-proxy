@@ -79,18 +79,20 @@ async function getUserToken(authCode) {
   }
 }
 
-async function dingGet(path, query = {}) {
+async function dingGet(path, query = {}, operatorId = '') {
   // 钉钉新版 OpenAPI 用 ACS token header 鉴权
   const token = await getAccessToken();
   const qs = new URLSearchParams(query).toString();
   const url = `https://api.dingtalk.com${path}${qs ? '?' + qs : ''}`;
-  const r = await fetch(url, {
-    method: 'GET',
-    headers: {
-      'x-acs-dingtalk-access-token': token,
-      'Content-Type': 'application/json',
-    },
-  });
+  const headers = {
+    'x-acs-dingtalk-access-token': token,
+    'Content-Type': 'application/json',
+  };
+  if (operatorId) {
+    // 钉钉新版 v2.0 接口同时支持 query 和 header 两种 operatorId
+    headers['x-acs-operator-id'] = operatorId;
+  }
+  const r = await fetch(url, { method: 'GET', headers });
   const j = await r.json();
   if (j.code !== undefined && j.code !== 0) {
     throw new Error(`dingGet ${path}: code=${j.code} message=${j.message || ''}`);
@@ -98,17 +100,17 @@ async function dingGet(path, query = {}) {
   return j;
 }
 
-async function dingPost(path, body) {
+async function dingPost(path, body, operatorId = '') {
   const token = await getAccessToken();
   const url = `https://api.dingtalk.com${path}`;
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'x-acs-dingtalk-access-token': token,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body || {}),
-  });
+  const headers = {
+    'x-acs-dingtalk-access-token': token,
+    'Content-Type': 'application/json',
+  };
+  if (operatorId) {
+    headers['x-acs-operator-id'] = operatorId;
+  }
+  const r = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body || {}) });
   const j = await r.json();
   if (j.code !== undefined && j.code !== 0) {
     throw new Error(`dingPost ${path}: code=${j.code} message=${j.message || ''}`);
@@ -116,18 +118,24 @@ async function dingPost(path, body) {
   return j;
 }
 
-async function listTables() {
+async function listTables(operatorId) {
   // 钉钉新版知识库列表（OpenAPI 官方）
   // GET /v2.0/wiki/workspaces
-  const data = await dingGet('/v2.0/wiki/workspaces', { maxResults: 30, orderBy: 'MODIFIED_TIME_DESC' });
-  return data;
+  // 必须传 operatorId（前端 dd.config 拿到的 unionId/userid）
+  return await dingGet('/v2.0/wiki/workspaces', {
+    maxResults: 30,
+    orderBy: 'MODIFIED_TIME_DESC',
+    operatorId: operatorId || '',
+  }, operatorId);
 }
 
-async function queryTable(appUuid, maxResults) {
-  // 通过知识库节点接口拿 doc 列表
-  // /v2.0/wiki/nodes?workspaceId=xxx
-  const data = await dingGet('/v2.0/wiki/nodes', { workspaceId: appUuid, maxResults: Math.min(50, maxResults || 50) });
-  return data;
+async function queryTable(appUuid, maxResults, operatorId) {
+  // 知识库节点列表
+  return await dingGet('/v2.0/wiki/nodes', {
+    workspaceId: appUuid,
+    maxResults: Math.min(50, maxResults || 50),
+    operatorId: operatorId || '',
+  }, operatorId);
 }
 
 export default async function handler(req, res) {
@@ -153,9 +161,21 @@ export default async function handler(req, res) {
       }
     }
 
+    // operatorId：v2.0 接口必须传用户 unionId/userid
+    // 优先级：query.operatorId > 从 authCode 解析 > 空白
+    const operatorId = req.query.operatorId || (userInfo && userInfo.userId) || '';
+
     const action = req.query.action;
     if (action === 'listTables') {
-      const data = await listTables();
+      if (!operatorId) {
+        res.status(400).json({
+          ok: false,
+          errcode: 'MissingOperatorId',
+          errmsg: 'listTables 需要传 operatorId（用户 unionId/userid）。请在钉钉里打开页面让前端自动从 dd.config 拿到；或在 URL 后面加 ?operatorId=YOUR_USERID。',
+        });
+        return;
+      }
+      const data = await listTables(operatorId);
       // 标准化输出：让前端简单判断
       const workspaces = data.workspaces || data.data?.workspaces || data.result?.list || [];
       res.status(200).json({
@@ -175,7 +195,15 @@ export default async function handler(req, res) {
         res.status(400).json({ ok: false, errmsg: 'appUuid 必填（用 listTables 返回的 id）' });
         return;
       }
-      const data = await queryTable(appUuid, parseInt(req.query.maxResults) || 50);
+      if (!operatorId) {
+        res.status(400).json({
+          ok: false,
+          errcode: 'MissingOperatorId',
+          errmsg: 'query 需要传 operatorId。请在钉钉里打开页面，或加 ?operatorId=YOUR_USERID。',
+        });
+        return;
+      }
+      const data = await queryTable(appUuid, parseInt(req.query.maxResults) || 50, operatorId);
       const nodes = data.nodes || data.data?.nodes || data.result?.list || [];
       res.status(200).json({
         ok: true,
