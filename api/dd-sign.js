@@ -41,7 +41,18 @@ async function getAccessToken(appKey, appSecret) {
   const r = await fetch(url);
   const j = await r.json();
   if (!j.access_token) {
-    throw new Error(`getAccessToken 失败 (两种接口都试了): v1.0+${JSON.stringify(j)}`);
+    const appKeyPreview = appKey ? `${appKey.slice(0, 6)}...${appKey.slice(-4)} (len=${appKey.length})` : '空';
+    const secretPreview = secret ? `${secret.slice(0, 4)}...${secret.slice(-4)} (len=${secret.length})` : '空';
+    throw new Error(
+      `getAccessToken 失败：\n` +
+      `  钉钉返回: errcode=${j.errcode} errmsg=${j.errmsg}\n` +
+      `  DINGTALK_APP_KEY 当前值: ${appKeyPreview}\n` +
+      `  DINGTALK_APP_SECRET 当前值: ${secretPreview}\n` +
+      `  排查：\n` +
+      `    1) Vercel 里 AppSecret 是否一字不差（核对空格/换行/字符数 = 64）\n` +
+      `    2) 钉钉开放平台是否重置过 AppSecret\n` +
+      `    3) 应用是否已发布/未被禁用`
+    );
   }
   return { token: j.access_token, source: 'oapi.dingtalk.com/gettoken' };
 }
