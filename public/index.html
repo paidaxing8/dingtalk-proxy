@@ -1713,6 +1713,12 @@ document.addEventListener('keydown', document._kbEscHandler);
 async function callKBProxy(action, params = {}) {
   const base = getKBProxy();
   if (!base) throw new Error('代理 URL 未配置');
+  // 如果在钉钉容器内，等免登授权码就绪（最多等 2 秒）
+  if (typeof dd !== 'undefined' && dd.config) {
+    for (let i = 0; i < 20 && !window._ddAuthCode; i++) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+  }
   // 如果在钉钉容器内，附上免登授权码
   if (window._ddAuthCode) params._ddAuthCode = window._ddAuthCode;
   // 构造 URL
@@ -1767,10 +1773,12 @@ async function loadKBTableList() {
     setKBList(`<div class="kb-empty">
       <div>请检查：</div>
       <div style="margin-top:8px;font-size:12px">
-        1) Vercel Worker 已部署并填入了 corpId / agentId / agentSecret<br>
+        1) Vercel 已部署，环境变量填的是 <b>DINGTALK_APP_KEY / DINGTALK_APP_SECRET / DINGTALK_AGENT_ID</b><br>
         2) 代理 URL 正确（以 /api/proxy 结尾）<br>
         3) 在钉钉开放平台把 Vercel 域名加到了「安全域名」<br>
-        4) 当前用户有至少一张 AI 表格的查看权限
+        4) 应用的「Wiki.Workspace.Read」权限已开通<br>
+        5) 当前用户在钉钉里至少有一张 AI 表格/知识库文档的查看权限<br>
+        6) 如果是 <code>MissingOperatorId</code>，请在钉钉里打开本页面（dd.config 拿到用户身份后会自动传入）
       </div>
     </div>`);
   }
