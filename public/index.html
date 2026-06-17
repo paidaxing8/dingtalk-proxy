@@ -1713,6 +1713,14 @@ document.addEventListener('keydown', document._kbEscHandler);
 async function callKBProxy(action, params = {}) {
   const base = getKBProxy();
   if (!base) throw new Error('代理 URL 未配置');
+  // ★ 启动诊断：把环境状态打到控制台，方便排查
+  console.log('[KB] callKBProxy', {
+    action,
+    isInDingTalk: typeof dd !== 'undefined' && !!dd.config,
+    hasAuthCode: !!window._ddAuthCode,
+    cachedUserId: (localStorage.getItem('dtkb_userid') || '').trim() || null,
+    ua: navigator.userAgent.includes('DingTalk') ? 'DingTalk' : (navigator.userAgent.includes('dingtalk') ? 'dingtalk-webview' : 'unknown'),
+  });
   // 如果在钉钉容器内，等免登授权码就绪（最多等 10 秒 —— dd.runtime.permission 回调有时慢）
   if (typeof dd !== 'undefined' && dd.config) {
     for (let i = 0; i < 100 && !window._ddAuthCode; i++) {
@@ -1744,14 +1752,15 @@ async function callKBProxy(action, params = {}) {
   const resp = await fetch(u.toString(), { method: 'GET', headers });
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok || (data && data.errcode && data.errcode !== 0)) {
-    // ⚠️ MissingOperatorId → 触发一次 whoami 重新拿 userid 再重试一次
+    // ⚠️ MissingOperatorId / MissingAuthCode → 自动重试一次 whoami
     // 不依赖 window._ddAuthCode：可能 authCode 回调刚到但 userid 还没缓存
-    if (data?.errcode === 'MissingOperatorId' || resp.status === 401) {
+    if (data?.errcode === 'MissingOperatorId' || data?.errcode === 'MissingAuthCode' || resp.status === 401) {
       console.warn('[KB] 鉴权失败，尝试重新拿 userid...');
       try {
-        // 如果 _ddAuthCode 还没拿到，再等最多 5 秒
+        // 如果 _ddAuthCode 还没拿到，再等最多 8 秒（覆盖钉钉容器内回调延迟）
         if (!window._ddAuthCode && typeof dd !== 'undefined' && dd.config) {
-          for (let i = 0; i < 50 && !window._ddAuthCode; i++) {
+          console.warn('[KB] authCode 未就绪，再等 8 秒...');
+          for (let i = 0; i < 80 && !window._ddAuthCode; i++) {
             await new Promise(r => setTimeout(r, 100));
           }
         }
@@ -1772,7 +1781,17 @@ async function callKBProxy(action, params = {}) {
           }
           throw new Error('whoami 未返回 userId：' + (wData?.errmsg || '未知'));
         }
-        throw new Error('authCode 仍为空，dd.runtime.permission 回调未到');
+        // 🔍 鉴权体检：把环境信息带回去，让用户能看清
+        const env = {
+          isInDingTalk: typeof dd !== 'undefined' && !!dd.config,
+          hasAuthCode: !!window._ddAuthCode,
+          hasUserId: !!(localStorage.getItem('dtkb_userid') || '').trim(),
+          ua: navigator.userAgent.slice(0, 80),
+        };
+        throw new Error(
+          'authCode 仍为空（已等待 18+ 秒）。诊断信息：' + JSON.stringify(env) +
+          '。如果在钉钉里打开但还是没拿到，常见原因：① 应用 corpId 与当前登录企业不匹配 ② 钉钉版本太旧（< 6.0）③ 未给应用开「免登录」权限。'
+        );
       } catch (e2) {
         throw new Error(`自动刷新 userid 失败：${e2.message}；原始错误：${data?.errmsg || data?.message || 'HTTP ' + resp.status}`);
       }
@@ -1922,11 +1941,27 @@ async function loadKBTableData(appUuid, name) {
         dd.biz.navigation.setTitle({ title: '学习报告生成器' });
 
         // 4) 拿免登授权码
+        const authCodeDeadline = Date.now() + 8000; // 8 秒超时（钉钉容器内通常 < 1 秒）
+        let authCodeTimer = setTimeout(() => {
+          if (!window._ddAuthCode) {
+            console.error('[钉钉] requestAuthCode 8 秒未回调，疑似钉钉版本过旧或 corpId 不匹配');
+            // 在 UI 顶部显式提示
+            const hint = document.createElement('div');
+            hint.id = '_ddAuthHint';
+            hint.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#fff3cd;color:#856404;padding:10px;text-align:center;z-index:99999;font-size:13px;border-bottom:2px solid #ffc107';
+            hint.innerHTML = '⚠️ 钉钉免登录未生效（8 秒内未拿到 authCode）。请在钉钉里打开（不是普通浏览器），并确认应用 corpId 正确。关闭后重试。 <a href="javascript:void(0)" onclick="this.parentElement.remove();location.reload()">点此重试</a>';
+            document.body.appendChild(hint);
+          }
+        }, 8000);
         dd.runtime.permission.requestAuthCode({
           corpId: cfg.corpId,
           onSuccess: function(result) {
+            clearTimeout(authCodeTimer);
             window._ddAuthCode = result.code;
-            console.log('[钉钉] 免登授权码已获取');
+            console.log('[钉钉] 免登授权码已获取, code=' + (result.code || '').slice(0, 8) + '...');
+            // 清除顶部提示
+            const oldHint = document.getElementById('_ddAuthHint');
+            if (oldHint) oldHint.remove();
             // ★ 立刻用 authCode 调 whoami 拿 userid，缓存到 localStorage
             // 后续 listTables / query 自动从 localStorage 取，不再需要 operatorId
             fetch(proxyBase + (proxyBase.includes('?') ? '&' : '?') + 'action=whoami', {
