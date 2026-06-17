@@ -56,9 +56,10 @@ vercel --prod # 部署到生产环境
 
 | Name | Value | 备注 |
 |------|-------|------|
-| `DING_CORP_ID` | `dingxxxxxxxxxxx` | 步骤 1 拿到的 CorpId |
-| `DING_AGENT_ID` | `xxxxxxxxxxxx` | AppKey |
-| `DING_AGENT_SECRET` | `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` | AppSecret |
+| `DINGTALK_APP_KEY` | `dingorqezq2hsweg6mxu` | 步骤 1 拿到的 AppKey（企业内部自建应用以 `ding` 开头） |
+| `DINGTALK_APP_SECRET` | `OO911nuBR8p_...` | AppSecret |
+| `DINGTALK_AGENT_ID` | `4684948052` | 应用的 AgentId（纯数字） |
+| `DINGTALK_CORP_ID` | `dingbd0f8b6e65b535dea1320dcb25e91351` | 企业 corpId（`ding` 开头的 32 位 hex） |
 | `ALLOW_ORIGIN` | `*` | 允许的来源，本地测试用 `*`，后续可改成 Vercel 域名 |
 
 3. 点 Save → **再点一次 Deploy** 让环境变量生效

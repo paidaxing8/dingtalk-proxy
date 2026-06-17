@@ -22,34 +22,56 @@ function randomStr(length = 16) {
 
 /**
  * 用 AppKey + AppSecret 换 access_token
+ * 优先走新接口 api.dingtalk.com/v1.0/oauth2/accessToken（适用于企业内部自建应用和第三方应用）
+ * 失败回退到老接口 oapi.dingtalk.com/gettoken
  */
 async function getAccessToken(appKey, appSecret) {
-  const url = `https://api.dingtalk.com/v1.0/oauth2/accessToken?appKey=${encodeURIComponent(appKey)}&appSecret=${encodeURIComponent(appSecret)}`;
-  const r = await fetch(url, { method: 'POST' });
-  const j = await r.json();
-  if (!j.accessToken) {
-    throw new Error(`getAccessToken 失败: ${JSON.stringify(j)}`);
+  // 尝试 1：新接口（api.dingtalk.com）
+  try {
+    const url = `https://api.dingtalk.com/v1.0/oauth2/accessToken?appKey=${encodeURIComponent(appKey)}&appSecret=${encodeURIComponent(appSecret)}`;
+    const r = await fetch(url, { method: 'POST' });
+    const j = await r.json();
+    if (j.accessToken) return { token: j.accessToken, source: 'v1.0/oauth2/accessToken' };
+  } catch (e) {
+    // 继续尝试老接口
   }
-  return j.accessToken;
+
+  // 尝试 2：老接口（oapi.dingtalk.com）
+  const url = `https://oapi.dingtalk.com/gettoken?appkey=${encodeURIComponent(appKey)}&appsecret=${encodeURIComponent(appSecret)}`;
+  const r = await fetch(url);
+  const j = await r.json();
+  if (!j.access_token) {
+    throw new Error(`getAccessToken 失败 (两种接口都试了): v1.0+${JSON.stringify(j)}`);
+  }
+  return { token: j.access_token, source: 'oapi.dingtalk.com/gettoken' };
 }
 
 /**
  * 用 access_token 换 jsapi_ticket
  */
 async function getJsapiTicket(accessToken) {
-  const url = `https://api.dingtalk.com/v1.0/oauth2/jsapiTickets`;
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'x-acs-dingtalk-access-token': accessToken,
-      'Content-Type': 'application/json',
-    },
-  });
+  // 尝试 1：新接口
+  try {
+    const r = await fetch('https://api.dingtalk.com/v1.0/oauth2/jsapiTickets', {
+      method: 'POST',
+      headers: {
+        'x-acs-dingtalk-access-token': accessToken,
+        'Content-Type': 'application/json',
+      },
+    });
+    const j = await r.json();
+    if (j.jsapiTicket) return j.jsapiTicket;
+  } catch (e) {
+    // 继续尝试老接口
+  }
+
+  // 尝试 2：老接口
+  const r = await fetch(`https://oapi.dingtalk.com/get_jsapi_ticket?access_token=${encodeURIComponent(accessToken)}`);
   const j = await r.json();
-  if (!j.jsapiTicket) {
+  if (!j.ticket) {
     throw new Error(`getJsapiTicket 失败: ${JSON.stringify(j)}`);
   }
-  return j.jsapiTicket;
+  return j.ticket;
 }
 
 /**
@@ -119,10 +141,12 @@ export default async function handler(req, res) {
     //   plain = `jsapi_ticket=${ticket}&noncestr=${nonceStr}&timestamp=${timeStamp}&url=${url}`
     //   key   = ticket
     let jsapiTicket = '';
+    let tokenSource = '';
     let signatureErr = '';
     try {
-      const accessToken = await getAccessToken(appKey, appSecret);
-      jsapiTicket = await getJsapiTicket(accessToken);
+      const { token, source } = await getAccessToken(appKey, appSecret);
+      tokenSource = source;
+      jsapiTicket = await getJsapiTicket(token);
     } catch (e) {
       signatureErr = e.message;
     }
@@ -150,6 +174,7 @@ export default async function handler(req, res) {
       signature,
       _debug: {
         signatureMethod,
+        tokenSource,
         jsapiTicketLen: jsapiTicket.length,
         signatureErr: signatureErr || undefined,
         url: url.slice(0, 80) + (url.length > 80 ? '...' : ''),
