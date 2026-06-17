@@ -198,6 +198,15 @@ export default async function handler(req, res) {
     }
     if (action === 'listTables') {
       if (!operatorId) {
+        // 🔍 调试模式：URL 加 ?_diag=1 时直接用 access_token 试调一下钉钉，看是不是用户身份问题
+        if (req.query._diag === '1') {
+          try {
+            const data = await listTables('');
+            return res.status(200).json({ ok: true, _diag: 'no_user_identity', data });
+          } catch (e) {
+            return res.status(200).json({ ok: false, _diag: 'no_user_identity', errmsg: e.message });
+          }
+        }
         res.status(400).json({
           ok: false,
           errcode: 'MissingOperatorId',
