@@ -1716,10 +1716,11 @@ async function callKBProxy(action, params = {}) {
   // ★ 启动诊断：把环境状态打到控制台，方便排查
   console.log('[KB] callKBProxy', {
     action,
-    isInDingTalk: typeof dd !== 'undefined' && !!dd.config,
+    isInDingTalk: window._isInDingTalk || (typeof dd !== 'undefined' && !!dd.config),
+    hasDdObj: typeof dd !== 'undefined' && !!dd.config,
     hasAuthCode: !!window._ddAuthCode,
     cachedUserId: (localStorage.getItem('dtkb_userid') || '').trim() || null,
-    ua: navigator.userAgent.includes('DingTalk') ? 'DingTalk' : (navigator.userAgent.includes('dingtalk') ? 'dingtalk-webview' : 'unknown'),
+    ua: navigator.userAgent.slice(0, 120),
   });
   // 如果在钉钉容器内，等免登授权码就绪（最多等 10 秒 —— dd.runtime.permission 回调有时慢）
   if (typeof dd !== 'undefined' && dd.config) {
@@ -1783,10 +1784,10 @@ async function callKBProxy(action, params = {}) {
         }
         // 🔍 鉴权体检：把环境信息带回去，让用户能看清
         const env = {
-          isInDingTalk: typeof dd !== 'undefined' && !!dd.config,
+          isInDingTalk: window._isInDingTalk || (typeof dd !== 'undefined' && !!dd.config),
           hasAuthCode: !!window._ddAuthCode,
           hasUserId: !!(localStorage.getItem('dtkb_userid') || '').trim(),
-          ua: navigator.userAgent.slice(0, 80),
+          ua: navigator.userAgent.slice(0, 120),
         };
         throw new Error(
           'authCode 仍为空（已等待 18+ 秒）。诊断信息：' + JSON.stringify(env) +
@@ -1897,9 +1898,26 @@ async function loadKBTableData(appUuid, name) {
    ⚠️ 在普通浏览器中 dd 未定义，静默跳过
 ══════════════════════════════════════════════════════ */
 ;(function initDingTalkJSAPI() {
-  // 只有在钉钉容器里 typeof dd !== 'undefined' 才执行
-  if (typeof dd === 'undefined') return;
-  if (!dd.config) return;
+  // 🔍 兼容多种钉钉容器：标准 dd / 钉钉 PC 内嵌 (DingTalkPC) / 旧版 window.dt / 钉钉移动端 UA
+  const _dd = (typeof dd !== 'undefined' && dd) ||
+              (typeof DingTalkPC !== 'undefined' && DingTalkPC) ||
+              (typeof window.dt !== 'undefined' && window.dt) ||
+              null;
+  const _isInDingTalk = !!_dd ||
+                        /DingTalk/i.test(navigator.userAgent) ||
+                        /dingtalk/i.test(navigator.userAgent);
+  // 暴露到 window 方便调试 + 兼容老代码
+  if (_dd && typeof window.dd === 'undefined') window.dd = _dd;
+  window._isInDingTalk = _isInDingTalk;
+  if (!_isInDingTalk) {
+    console.log('[钉钉] 未检测到钉钉容器，UA:', navigator.userAgent);
+    return;
+  }
+  const dd = _dd || window.dd;
+  if (!dd.config) {
+    console.warn('[钉钉] 检测到钉钉容器但 dd.config 不存在');
+    return;
+  }
 
   const proxyBase = getKBProxy();
   if (!proxyBase) {
@@ -1995,6 +2013,35 @@ async function loadKBTableData(appUuid, name) {
     .catch(err => {
       console.error('[钉钉] 签名请求失败：', err);
     });
+})();
+
+// 🆕 手动输入 corpId + agentId 兜底（钉钉 PC 客户端 dd 对象未注入时）
+;(function manualDingTalkFallback() {
+  // 只在钉钉 PC 客户端里、但 dd 对象没注入时显示
+  if (!window._isInDingTalk) return;
+  if (typeof dd !== 'undefined' && dd.config) return; // 正常路径，不需要
+  setTimeout(() => {
+    const hint = document.createElement('div');
+    hint.id = '_ddManualHint';
+    hint.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#f8d7da;color:#721c24;padding:12px;text-align:center;z-index:99999;font-size:13px;border-bottom:2px solid #f5c6cb;font-family:monospace';
+    hint.innerHTML = `
+      ⚠️ 检测到您在钉钉 PC 客户端里，但 JSAPI <code>dd</code> 对象未注入。
+      请在下面输入您的 <b>钉钉 userId（unionId）</b>，绕过免登直接调用：
+      <br>
+      <input id="_manualUserId" placeholder="输入您的 userId" style="margin:6px;padding:4px;width:240px">
+      <button id="_manualUserIdBtn" style="padding:4px 12px">保存并重试</button>
+      <a href="javascript:void(0)" onclick="this.parentElement.remove()" style="margin-left:12px;color:#721c24">关闭</a>
+    `;
+    document.body.appendChild(hint);
+    document.getElementById('_manualUserIdBtn').onclick = () => {
+      const v = document.getElementById('_manualUserId').value.trim();
+      if (v) {
+        localStorage.setItem('dtkb_userid', v);
+        alert('已保存 userId=' + v + '，点"重试/重新加载"再试一次');
+        hint.remove();
+      }
+    };
+  }, 4000);
 })();
 </script>
 </body>
