@@ -35,14 +35,16 @@ export default async function handler(req, res) {
   }
 
   try {
-    const corpId = process.env.DING_CORP_ID || '';
-    const agentId = process.env.DING_AGENT_ID || '';
-    const secret = process.env.DING_AGENT_SECRET || '';
+    // 同时支持 DING_* 和 DINGTALK_APP_* 两套变量名
+    const corpId = process.env.DING_CORP_ID || process.env.DINGTALK_CORP_ID || '';
+    const agentId = process.env.DING_AGENT_ID || process.env.DINGTALK_AGENT_ID || '';
+    const secret = process.env.DING_AGENT_SECRET || process.env.DINGTALK_APP_SECRET || '';
+    const appKey = process.env.DINGTALK_APP_KEY || process.env.DING_AGENT_ID || '';
 
-    if (!corpId || !agentId || !secret) {
+    if (!agentId || !secret || !appKey) {
       res.status(500).json({
         ok: false,
-        errmsg: '环境变量 DING_CORP_ID / DING_AGENT_ID / DING_AGENT_SECRET 未配置',
+        errmsg: '环境变量 DINGTALK_AGENT_ID / DINGTALK_APP_KEY / DINGTALK_APP_SECRET 未配置',
       });
       return;
     }
@@ -68,11 +70,11 @@ export default async function handler(req, res) {
     const signatureA = crypto.createHash('sha1').update(plainA).digest('hex');
 
     // 方式 B：标准 HMAC-SHA1 签名（用 ticket 做 key）
-    // 先获取 jsapi_ticket
+    // 先获取 jsapi_ticket（用 appKey + appSecret 换 access_token）
     let jsapiTicket = '';
     try {
       const tokenResp = await fetch(
-        `https://oapi.dingtalk.com/gettoken?appkey=${encodeURIComponent(agentId)}&appsecret=${encodeURIComponent(secret)}`
+        `https://oapi.dingtalk.com/gettoken?appkey=${encodeURIComponent(appKey)}&appsecret=${encodeURIComponent(secret)}`
       );
       const tokenJson = await tokenResp.json();
       if (tokenJson.access_token) {

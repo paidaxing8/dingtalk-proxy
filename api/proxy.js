@@ -25,15 +25,17 @@ async function getAccessToken() {
   const now = Date.now();
   if (_tokenCache.value && now < _tokenCache.expires) return _tokenCache.value;
 
-  const corpId = process.env.DING_CORP_ID;
-  const agentId = process.env.DING_AGENT_ID;
-  const secret = process.env.DING_AGENT_SECRET;
-  if (!corpId || !agentId || !secret) {
-    throw new Error('环境变量 DING_CORP_ID / DING_AGENT_ID / DING_AGENT_SECRET 未配置');
-  }
+    // 同时支持 DING_* 和 DINGTALK_APP_* 两套变量名（向后兼容）
+    const corpId = process.env.DING_CORP_ID || process.env.DINGTALK_CORP_ID || '';
+    const agentId = process.env.DING_AGENT_ID || process.env.DINGTALK_AGENT_ID || '';
+    const secret = process.env.DING_AGENT_SECRET || process.env.DINGTALK_APP_SECRET || '';
+    const appKey = process.env.DINGTALK_APP_KEY || process.env.DING_AGENT_ID || '';
+    if (!appKey || !secret) {
+      throw new Error('环境变量 DINGTALK_APP_KEY / DINGTALK_APP_SECRET 未配置');
+    }
 
-  // 企业内部应用：用 agentId (AppKey) + agentSecret (AppSecret) 换 token
-  const url = `https://oapi.dingtalk.com/gettoken?appkey=${encodeURIComponent(agentId)}&appsecret=${encodeURIComponent(secret)}`;
+    // 企业内部应用：用 appKey + secret 换 token
+    const url = `https://oapi.dingtalk.com/gettoken?appkey=${encodeURIComponent(appKey)}&appsecret=${encodeURIComponent(secret)}`;
   const r = await fetch(url);
   const j = await r.json();
   if (!j.access_token) {
@@ -46,10 +48,11 @@ async function getAccessToken() {
 // 用免登授权码换用户级 access_token（可选：当前端传了 _ddAuthCode）
 async function getUserToken(authCode) {
   if (!authCode) return null;
-  const agentId = process.env.DING_AGENT_ID;
-  const secret = process.env.DING_AGENT_SECRET;
-  const corpId = process.env.DING_CORP_ID;
-  if (!agentId || !secret || !corpId) return null;
+    // 同时支持 DING_* 和 DINGTALK_APP_* 两套变量名
+    const agentId = process.env.DING_AGENT_ID || process.env.DINGTALK_AGENT_ID || '';
+    const secret = process.env.DING_AGENT_SECRET || process.env.DINGTALK_APP_SECRET || '';
+    const corpId = process.env.DING_CORP_ID || process.env.DINGTALK_CORP_ID || '';
+    if (!agentId || !secret || !corpId) return null;
 
   try {
     // 先换 app 级 token
