@@ -1720,7 +1720,7 @@ async function callKBProxy(action, params = {}) {
     hasDdObj: typeof dd !== 'undefined' && !!dd.config,
     hasAuthCode: !!window._ddAuthCode,
     cachedUserId: (localStorage.getItem('dtkb_userid') || '').trim() || null,
-    ua: navigator.userAgent.slice(0, 120),
+    ua: navigator.userAgent,
   });
   // 如果在钉钉容器内，等免登授权码就绪（最多等 10 秒 —— dd.runtime.permission 回调有时慢）
   if (typeof dd !== 'undefined' && dd.config) {
@@ -1787,7 +1787,7 @@ async function callKBProxy(action, params = {}) {
           isInDingTalk: window._isInDingTalk || (typeof dd !== 'undefined' && !!dd.config),
           hasAuthCode: !!window._ddAuthCode,
           hasUserId: !!(localStorage.getItem('dtkb_userid') || '').trim(),
-          ua: navigator.userAgent.slice(0, 120),
+          ua: navigator.userAgent,
         };
         throw new Error(
           'authCode 仍为空（已等待 18+ 秒）。诊断信息：' + JSON.stringify(env) +
