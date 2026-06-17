@@ -1,0 +1,10 @@
+{
+  "name": "dingtalk-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "钉钉知识库代理 - 部署到 Vercel，让学习报告生成器能直连钉钉 AI 表格",
+  "scripts": {
+    "dev": "vercel dev"
+  }
+}
