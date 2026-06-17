@@ -1,16 +1,15 @@
 // api/dd-sign.js
 // 钉钉 JSAPI 签名端点
-// dd.config 需要一个后端计算的 HMAC-SHA1 签名，参数包括：
-//   agentId, corpId, timeStamp, nonceStr, signature
-// 环境变量（与 proxy.js 共用）：
-//   DING_CORP_ID | DING_AGENT_ID | DING_AGENT_SECRET
+// dd.config 需要后端计算的 HMAC-SHA1 签名，参数：
+//   corpId, agentId, timeStamp, nonceStr, signature
+// 环境变量（与 proxy.js 共用一套）：
+//   DINGTALK_APP_KEY    - 应用的 AppKey
+//   DINGTALK_APP_SECRET - 应用的 AppSecret
+//   DINGTALK_AGENT_ID   - 应用的 AgentId
+//   DINGTALK_CORP_ID    - 企业 corpId（企业内部应用需要，第三方应用不需要）
 // Vercel Serverless Function — 部署到 /api/dd-sign
 
 import crypto from 'crypto';
-
-function sha1(data) {
-  return crypto.createHmac('sha1', '').update(data).digest('hex');
-}
 
 function randomStr(length = 16) {
   const charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -19,6 +18,47 @@ function randomStr(length = 16) {
     result += charset.charAt(Math.floor(Math.random() * charset.length));
   }
   return result;
+}
+
+/**
+ * 用 AppKey + AppSecret 换 access_token
+ */
+async function getAccessToken(appKey, appSecret) {
+  const url = `https://api.dingtalk.com/v1.0/oauth2/accessToken?appKey=${encodeURIComponent(appKey)}&appSecret=${encodeURIComponent(appSecret)}`;
+  const r = await fetch(url, { method: 'POST' });
+  const j = await r.json();
+  if (!j.accessToken) {
+    throw new Error(`getAccessToken 失败: ${JSON.stringify(j)}`);
+  }
+  return j.accessToken;
+}
+
+/**
+ * 用 access_token 换 jsapi_ticket
+ */
+async function getJsapiTicket(accessToken) {
+  const url = `https://api.dingtalk.com/v1.0/oauth2/jsapiTickets`;
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'x-acs-dingtalk-access-token': accessToken,
+      'Content-Type': 'application/json',
+    },
+  });
+  const j = await r.json();
+  if (!j.jsapiTicket) {
+    throw new Error(`getJsapiTicket 失败: ${JSON.stringify(j)}`);
+  }
+  return j.jsapiTicket;
+}
+
+/**
+ * 拿企业的 corpId（通过 /v1.0/auth/corp/accessToken 换）
+ * 第三方应用必传 corpId；企业内部应用 corpId 在 admin 后台可查
+ */
+async function getCorpIdFromToken(accessToken) {
+  // 这个接口需要 unionId，所以企业内部应用不适合走这条；保留兜底
+  return '';
 }
 
 export default async function handler(req, res) {
@@ -35,71 +75,70 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 同时支持 DING_* 和 DINGTALK_APP_* 两套变量名
-    const corpId = process.env.DING_CORP_ID || process.env.DINGTALK_CORP_ID || '';
-    const agentId = process.env.DING_AGENT_ID || process.env.DINGTALK_AGENT_ID || '';
-    const secret = process.env.DING_AGENT_SECRET || process.env.DINGTALK_APP_SECRET || '';
+    // 读取环境变量（统一用 DINGTALK_* 命名，老的 DING_* 留作兜底）
     const appKey = process.env.DINGTALK_APP_KEY || process.env.DING_AGENT_ID || '';
+    const appSecret = process.env.DINGTALK_APP_SECRET || process.env.DING_AGENT_SECRET || '';
+    const agentId = process.env.DINGTALK_AGENT_ID || process.env.DING_AGENT_ID || '';
+    // corpId 三个来源：① 环境变量 ② token API 自动解析（部分类型应用支持） ③ 抛错让用户去开放平台拿
+    let corpId = process.env.DINGTALK_CORP_ID || process.env.DING_CORP_ID || '';
 
-    if (!agentId || !secret || !appKey) {
+    if (!appKey || !appSecret || !agentId) {
       res.status(500).json({
         ok: false,
-        errmsg: '环境变量 DINGTALK_AGENT_ID / DINGTALK_APP_KEY / DINGTALK_APP_SECRET 未配置',
+        errmsg: '环境变量 DINGTALK_APP_KEY / DINGTALK_APP_SECRET / DINGTALK_AGENT_ID 未配置',
+        env: {
+          hasAppKey: !!appKey,
+          hasAppSecret: !!appSecret,
+          hasAgentId: !!agentId,
+          hasCorpId: !!corpId,
+        },
       });
       return;
     }
 
-    // 前端传入的页面 url（去掉 hash）
+    // agentId 校验：必须是纯数字
+    if (!/^\d+$/.test(agentId)) {
+      res.status(500).json({
+        ok: false,
+        errmsg: `DINGTALK_AGENT_ID 格式错误，应为纯数字，实际是 "${agentId}"`,
+      });
+      return;
+    }
+
+    // 前端传入的页面 url（去掉 hash 和 query 中的 _ddnav=）
     const url = (req.query.url || '').split('#')[0];
+    if (!url) {
+      res.status(400).json({ ok: false, errmsg: '缺少 url 参数，例如 ?url=https://your-domain.com/' });
+      return;
+    }
+
     const nonceStr = randomStr(16);
     const timeStamp = String(Math.floor(Date.now() / 1000));
 
-    // dd.config 签名算法（钉钉官方文档）：
-    //   ① ticket = jsapi_ticket（从 dd.get_jsapi_ticket 接口获取）
-    //   ② plainSign = `jsapi_ticket=${ticket}&noncestr=${nonceStr}&timestamp=${timeStamp}&url=${url}`
-    //   ③ signature = HMAC-SHA1(plainSign, ticket)  ← 注意 key 也是 ticket 本身
-    // 注：这里直接用 agentSecret 换 jsapi_ticket，在实际部署中如果遇到签名不通过，
-    //     改为先 gettoken → get_jsapi_ticket → 再用 ticket 签名。
-    //
-    // 钉钉 JSAPI 签名简化版（适用于企业内部应用，agentSecret 即 ticket 的退化场景）：
-    //   plain = `noncestr=${nonceStr}&timestamp=${timeStamp}&url=${url}`
-    //   signature = SHA1(plain)  ← 用纯 SHA1，不需要 HMAC
-
-    // 方式 A：简化签名（部分企业内部应用适用）
-    const plainA = `noncestr=${nonceStr}&timestamp=${timeStamp}&url=${url}`;
-    const signatureA = crypto.createHash('sha1').update(plainA).digest('hex');
-
-    // 方式 B：标准 HMAC-SHA1 签名（用 ticket 做 key）
-    // 先获取 jsapi_ticket（用 appKey + appSecret 换 access_token）
+    // 标准钉钉 JSAPI 签名：HMAC-SHA1(plain, ticket)
+    //   plain = `jsapi_ticket=${ticket}&noncestr=${nonceStr}&timestamp=${timeStamp}&url=${url}`
+    //   key   = ticket
     let jsapiTicket = '';
+    let signatureErr = '';
     try {
-      const tokenResp = await fetch(
-        `https://oapi.dingtalk.com/gettoken?appkey=${encodeURIComponent(appKey)}&appsecret=${encodeURIComponent(secret)}`
-      );
-      const tokenJson = await tokenResp.json();
-      if (tokenJson.access_token) {
-        const ticketResp = await fetch(
-          `https://oapi.dingtalk.com/get_jsapi_ticket?access_token=${tokenJson.access_token}`
-        );
-        const ticketJson = await ticketResp.json();
-        if (ticketJson.ticket) {
-          jsapiTicket = ticketJson.ticket;
-        }
-      }
+      const accessToken = await getAccessToken(appKey, appSecret);
+      jsapiTicket = await getJsapiTicket(accessToken);
     } catch (e) {
-      // 获取 ticket 失败，回退到方式 A
-      console.warn('get_jsapi_ticket 失败，使用简化签名：', e.message);
+      signatureErr = e.message;
     }
 
     let signature;
-
+    let signatureMethod = '';
     if (jsapiTicket) {
       // 标准签名
-      const plainB = `jsapi_ticket=${jsapiTicket}&noncestr=${nonceStr}&timestamp=${timeStamp}&url=${url}`;
-      signature = crypto.createHmac('sha1', jsapiTicket).update(plainB).digest('hex');
+      const plain = `jsapi_ticket=${jsapiTicket}&noncestr=${nonceStr}&timestamp=${timeStamp}&url=${url}`;
+      signature = crypto.createHmac('sha1', jsapiTicket).update(plain).digest('hex');
+      signatureMethod = 'HMAC-SHA1(jsapi_ticket)';
     } else {
-      // 简化签名
-      signature = signatureA;
+      // 兜底：纯 SHA1 简化签名（部分企业内部应用可用）
+      const plain = `noncestr=${nonceStr}&timestamp=${timeStamp}&url=${url}`;
+      signature = crypto.createHash('sha1').update(plain).digest('hex');
+      signatureMethod = 'SHA1(fallback)';
     }
 
     res.status(200).json({
@@ -109,6 +148,12 @@ export default async function handler(req, res) {
       timeStamp,
       nonceStr,
       signature,
+      _debug: {
+        signatureMethod,
+        jsapiTicketLen: jsapiTicket.length,
+        signatureErr: signatureErr || undefined,
+        url: url.slice(0, 80) + (url.length > 80 ? '...' : ''),
+      },
     });
   } catch (err) {
     res.status(500).json({
