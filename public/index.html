@@ -1719,15 +1719,20 @@ async function callKBProxy(action, params = {}) {
       await new Promise(r => setTimeout(r, 100));
     }
   }
-  // 如果在钉钉容器内，附上免登授权码
-  if (window._ddAuthCode) params._ddAuthCode = window._ddAuthCode;
-  // 构造 URL
+  // 构造 URL：只放 action 和 appUuid/maxResults 这种纯 ASCII 参数
   const u = new URL(base);
   u.searchParams.set('action', action);
   for (const [k, v] of Object.entries(params)) {
-    if (v != null) u.searchParams.set(k, String(v));
+    // ⚠️ _ddAuthCode 和 operatorId 走 header，不进 URL（中文/特殊字符会触发 fetch ByteString 报错）
+    if (v == null) continue;
+    if (k === '_ddAuthCode' || k === 'operatorId') continue;
+    u.searchParams.set(k, String(v));
   }
-  const resp = await fetch(u.toString(), { method: 'GET' });
+  // 走 header 的参数
+  const headers = {};
+  if (window._ddAuthCode) headers['x-dd-authcode'] = window._ddAuthCode;
+  if (params.operatorId) headers['x-dd-operator-id'] = String(params.operatorId);
+  const resp = await fetch(u.toString(), { method: 'GET', headers });
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok || (data && data.errcode && data.errcode !== 0)) {
     throw new Error(data?.errmsg || data?.message || `HTTP ${resp.status}`);
@@ -1886,9 +1891,7 @@ async function loadKBTableData(appUuid, name) {
             // 不影响使用，KB 代理会回退到 agentSecret 模式
           }
         });
-      });
-
-      // dd.error
+      });      // dd.error
       dd.error(function(err) {
         console.error('[钉钉] dd.config 错误：', JSON.stringify(err));
       });

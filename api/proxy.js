@@ -122,10 +122,10 @@ async function listTables(operatorId) {
   // 钉钉新版知识库列表（OpenAPI 官方）
   // GET /v2.0/wiki/workspaces
   // 必须传 operatorId（前端 dd.config 拿到的 unionId/userid）
+  // ⚠️ operatorId 只走 header（x-acs-operator-id），不要塞 query，避免中文/特殊字符触发 fetch 的 ByteString 报错
   return await dingGet('/v2.0/wiki/workspaces', {
     maxResults: 30,
     orderBy: 'MODIFIED_TIME_DESC',
-    operatorId: operatorId || '',
   }, operatorId);
 }
 
@@ -134,7 +134,6 @@ async function queryTable(appUuid, maxResults, operatorId) {
   return await dingGet('/v2.0/wiki/nodes', {
     workspaceId: appUuid,
     maxResults: Math.min(50, maxResults || 50),
-    operatorId: operatorId || '',
   }, operatorId);
 }
 
@@ -162,8 +161,13 @@ export default async function handler(req, res) {
     }
 
     // operatorId：v2.0 接口必须传用户 unionId/userid
-    // 优先级：query.operatorId > 从 authCode 解析 > 空白
-    const operatorId = req.query.operatorId || (userInfo && userInfo.userId) || '';
+    // 接收顺序：query.operatorId > header.x-dd-operator-id > 从 authCode 解析
+    // ⚠️ operatorId 永远走 header 传给钉钉 API，绝不放 URL query（中文/特殊字符会触发 fetch ByteString 报错）
+    const operatorId =
+      req.query.operatorId ||
+      req.headers['x-dd-operator-id'] ||
+      (userInfo && userInfo.userId) ||
+      '';
 
     const action = req.query.action;
     if (action === 'listTables') {
