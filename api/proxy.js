@@ -79,52 +79,55 @@ async function getUserToken(authCode) {
   }
 }
 
+async function dingGet(path, query = {}) {
+  // 钉钉新版 OpenAPI 用 ACS token header 鉴权
+  const token = await getAccessToken();
+  const qs = new URLSearchParams(query).toString();
+  const url = `https://api.dingtalk.com${path}${qs ? '?' + qs : ''}`;
+  const r = await fetch(url, {
+    method: 'GET',
+    headers: {
+      'x-acs-dingtalk-access-token': token,
+      'Content-Type': 'application/json',
+    },
+  });
+  const j = await r.json();
+  if (j.code !== undefined && j.code !== 0) {
+    throw new Error(`dingGet ${path}: code=${j.code} message=${j.message || ''}`);
+  }
+  return j;
+}
+
 async function dingPost(path, body) {
   const token = await getAccessToken();
-  const url = `https://oapi.dingtalk.com${path}?access_token=${encodeURIComponent(token)}`;
+  const url = `https://api.dingtalk.com${path}`;
   const r = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'x-acs-dingtalk-access-token': token,
+      'Content-Type': 'application/json',
+    },
     body: JSON.stringify(body || {}),
   });
   const j = await r.json();
-  if (j.errcode !== undefined && j.errcode !== 0) {
-    throw new Error(`dingPost ${path}: errcode=${j.errcode} errmsg=${j.errmsg || ''}`);
+  if (j.code !== undefined && j.code !== 0) {
+    throw new Error(`dingPost ${path}: code=${j.code} message=${j.message || ''}`);
   }
   return j;
 }
 
 async function listTables() {
-  // 钉钉 AI 表格列表：用 aitable/v1/list
-  // 实际接口：/v1.0/aitable/listApps（或 /topapi/process/instance/list 等）
-  // 这里走"知识库文档列表" — /v1.0/doc/search 更通用，能列出所有可见文档/表格
-  // 真实生产建议改用 /v1.0/aitable/apps/list 拿 AI 表格
-  const r = await dingPost('/topapi/wiki/space/list', { corpAccessToken: await getAccessToken() });
-  return r;
+  // 钉钉新版知识库列表（OpenAPI 官方）
+  // GET /v2.0/wiki/workspaces
+  const data = await dingGet('/v2.0/wiki/workspaces', { maxResults: 30, orderBy: 'MODIFIED_TIME_DESC' });
+  return data;
 }
 
 async function queryTable(appUuid, maxResults) {
-  // 拉取某张 AI 表格的记录
-  // 接口：/v1.0/aitable/records/query 或老版 /topapi/aitable/record/list
-  // 钉钉推荐（2024+）：/v1.0/aitable/data/query
-  const token = await getAccessToken();
-  const url = `https://api.dingtalk.com/v1.0/aitable/data/query?access_token=${encodeURIComponent(token)}`;
-  const body = {
-    appType: 'aitable',
-    appUuid: appUuid,
-    pageSize: Math.min(1000, maxResults || 1000),
-    pageNum: 1,
-  };
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const j = await r.json();
-  if (j.code !== undefined && j.code !== 0) {
-    throw new Error('aitable.data.query 失败：' + (j.msg || JSON.stringify(j)));
-  }
-  return j;
+  // 通过知识库节点接口拿 doc 列表
+  // /v2.0/wiki/nodes?workspaceId=xxx
+  const data = await dingGet('/v2.0/wiki/nodes', { workspaceId: appUuid, maxResults: Math.min(50, maxResults || 50) });
+  return data;
 }
 
 export default async function handler(req, res) {
@@ -154,22 +157,34 @@ export default async function handler(req, res) {
     if (action === 'listTables') {
       const data = await listTables();
       // 标准化输出：让前端简单判断
+      const workspaces = data.workspaces || data.data?.workspaces || data.result?.list || [];
       res.status(200).json({
         ok: true,
-        tables: data.result?.spaceList || data.result?.list || [],
+        tables: workspaces.map(w => ({
+          id: w.workspaceId || w.uuid,
+          name: w.name,
+          url: w.url,
+          modified: w.gmtModified,
+        })),
         user: userInfo ? { userId: userInfo.userId } : null,
         raw: data,
       });
     } else if (action === 'query') {
       const appUuid = req.query.appUuid;
       if (!appUuid) {
-        res.status(400).json({ ok: false, errmsg: 'appUuid 必填' });
+        res.status(400).json({ ok: false, errmsg: 'appUuid 必填（用 listTables 返回的 id）' });
         return;
       }
-      const data = await queryTable(appUuid, parseInt(req.query.maxResults) || 1000);
+      const data = await queryTable(appUuid, parseInt(req.query.maxResults) || 50);
+      const nodes = data.nodes || data.data?.nodes || data.result?.list || [];
       res.status(200).json({
         ok: true,
-        records: data.data?.records || data.records || data.data?.values || [],
+        records: nodes.map(n => ({
+          id: n.nodeId || n.uuid,
+          name: n.name,
+          type: n.type || n.dentryType,
+          url: n.url,
+        })),
         user: userInfo ? { userId: userInfo.userId } : null,
         raw: data,
       });
