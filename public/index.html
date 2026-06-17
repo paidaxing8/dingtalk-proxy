@@ -1713,9 +1713,9 @@ document.addEventListener('keydown', document._kbEscHandler);
 async function callKBProxy(action, params = {}) {
   const base = getKBProxy();
   if (!base) throw new Error('代理 URL 未配置');
-  // 如果在钉钉容器内，等免登授权码就绪（最多等 2 秒）
+  // 如果在钉钉容器内，等免登授权码就绪（最多等 10 秒 —— dd.runtime.permission 回调有时慢）
   if (typeof dd !== 'undefined' && dd.config) {
-    for (let i = 0; i < 20 && !window._ddAuthCode; i++) {
+    for (let i = 0; i < 100 && !window._ddAuthCode; i++) {
       await new Promise(r => setTimeout(r, 100));
     }
   }
@@ -1731,10 +1731,52 @@ async function callKBProxy(action, params = {}) {
   // 走 header 的参数
   const headers = {};
   if (window._ddAuthCode) headers['x-dd-authcode'] = window._ddAuthCode;
-  if (params.operatorId) headers['x-dd-operator-id'] = String(params.operatorId);
+  // ★ 自动注入 operatorId（从 whoami 拿到的 userId）
+  if (!params.operatorId) {
+    const cached = (localStorage.getItem('dtkb_userid') || '').trim();
+    if (cached) {
+      headers['x-dd-operator-id'] = cached;
+      params = { ...params, operatorId: cached };
+    }
+  } else {
+    headers['x-dd-operator-id'] = String(params.operatorId);
+  }
   const resp = await fetch(u.toString(), { method: 'GET', headers });
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok || (data && data.errcode && data.errcode !== 0)) {
+    // ⚠️ MissingOperatorId → 触发一次 whoami 重新拿 userid 再重试一次
+    // 不依赖 window._ddAuthCode：可能 authCode 回调刚到但 userid 还没缓存
+    if (data?.errcode === 'MissingOperatorId' || resp.status === 401) {
+      console.warn('[KB] 鉴权失败，尝试重新拿 userid...');
+      try {
+        // 如果 _ddAuthCode 还没拿到，再等最多 5 秒
+        if (!window._ddAuthCode && typeof dd !== 'undefined' && dd.config) {
+          for (let i = 0; i < 50 && !window._ddAuthCode; i++) {
+            await new Promise(r => setTimeout(r, 100));
+          }
+        }
+        if (window._ddAuthCode) {
+          const wu = new URL(base);
+          wu.searchParams.set('action', 'whoami');
+          const wHeaders = { 'x-dd-authcode': window._ddAuthCode };
+          const wResp = await fetch(wu.toString(), { method: 'GET', headers: wHeaders });
+          const wData = await wResp.json().catch(() => ({}));
+          if (wData?.userId) {
+            localStorage.setItem('dtkb_userid', wData.userId);
+            console.log('[KB] 已刷新 userid：', wData.userId);
+            const retryHeaders = { ...headers, 'x-dd-operator-id': wData.userId };
+            const retry = await fetch(u.toString(), { method: 'GET', headers: retryHeaders });
+            const rData = await retry.json().catch(() => ({}));
+            if (retry.ok && (!rData.errcode || rData.errcode === 0)) return rData;
+            throw new Error(rData?.errmsg || rData?.message || `HTTP ${retry.status}`);
+          }
+          throw new Error('whoami 未返回 userId：' + (wData?.errmsg || '未知'));
+        }
+        throw new Error('authCode 仍为空，dd.runtime.permission 回调未到');
+      } catch (e2) {
+        throw new Error(`自动刷新 userid 失败：${e2.message}；原始错误：${data?.errmsg || data?.message || 'HTTP ' + resp.status}`);
+      }
+    }
     throw new Error(data?.errmsg || data?.message || `HTTP ${resp.status}`);
   }
   return data;
@@ -1885,6 +1927,25 @@ async function loadKBTableData(appUuid, name) {
           onSuccess: function(result) {
             window._ddAuthCode = result.code;
             console.log('[钉钉] 免登授权码已获取');
+            // ★ 立刻用 authCode 调 whoami 拿 userid，缓存到 localStorage
+            // 后续 listTables / query 自动从 localStorage 取，不再需要 operatorId
+            fetch(proxyBase + (proxyBase.includes('?') ? '&' : '?') + 'action=whoami', {
+              method: 'GET',
+              headers: { 'x-dd-authcode': result.code },
+            })
+            .then(r => r.json())
+            .then(w => {
+              if (w && w.userId) {
+                localStorage.setItem('dtkb_userid', w.userId);
+                console.log('[钉钉] userid 已缓存：', w.userId, 'corpId=' + w.corpId);
+                if (w.corpId && w.corpId !== cfg.corpId) {
+                  console.warn('[钉钉] corpId 不一致：dd.config=' + cfg.corpId + ' / whoami=' + w.corpId);
+                }
+              } else {
+                console.warn('[钉钉] whoami 失败：', w?.errmsg);
+              }
+            })
+            .catch(err => console.warn('[钉钉] whoami 请求失败：', err));
           },
           onFail: function(err) {
             console.warn('[钉钉] 获取授权码失败：', JSON.stringify(err));

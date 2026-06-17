@@ -177,6 +177,25 @@ export default async function handler(req, res) {
       '';
 
     const action = req.query.action;
+    if (action === 'whoami') {
+      // ⚠️ 单独提供"用 authCode 换 userid"端点，前端首次进入钉钉时调用
+      // 返回 { ok, userId, nick, unionId } —— 前端拿到后存到 localStorage 后续所有请求都传
+      if (!userInfo) {
+        res.status(400).json({
+          ok: false,
+          errcode: 'MissingAuthCode',
+          errmsg: 'whoami 需要传 x-dd-authcode header（从 dd.runtime.permission.requestAuthCode 拿到的 code）。请确认页面是在钉钉容器里打开的。',
+        });
+        return;
+      }
+      res.status(200).json({
+        ok: true,
+        userId: userInfo.userId,
+        agentId: process.env.DING_AGENT_ID || process.env.DINGTALK_AGENT_ID || '',
+        corpId: process.env.DING_CORP_ID || process.env.DINGTALK_CORP_ID || '',
+      });
+      return;
+    }
     if (action === 'listTables') {
       if (!operatorId) {
         res.status(400).json({
