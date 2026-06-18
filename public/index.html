@@ -1914,105 +1914,124 @@ async function loadKBTableData(appUuid, name) {
     return;
   }
   const dd = _dd || window.dd;
-  if (!dd.config) {
-    console.warn('[钉钉] 检测到钉钉容器但 dd.config 不存在');
-    return;
-  }
-
-  const proxyBase = getKBProxy();
-  if (!proxyBase) {
-    console.warn('[钉钉] 代理 URL 未配置，跳过 dd.config');
-    return;
-  }
-
-  // 1) 向后端请求签名
-  const signUrl = proxyBase.replace(/\/api\/proxy$/, '/api/dd-sign');
-  fetch(signUrl + '?url=' + encodeURIComponent(location.href.split('#')[0]))
-    .then(r => r.json())
-    .then(cfg => {
-      if (!cfg.ok || !cfg.signature) {
-        console.warn('[钉钉] 签名获取失败：', cfg.errmsg || '未知错误');
-        return;
+  // 🆕 如果检测到钉钉环境但 dd 对象不存在，尝试动态加载 dingtalk-jsapi SDK
+  if (!dd || !dd.config) {
+    console.warn('[钉钉] 钉钉容器内但 dd 对象不存在，尝试加载 dingtalk-jsapi SDK...');
+    const script = document.createElement('script');
+    script.src = 'https://g.alicdn.com/dingding/dingtalk-jsapi/2.10.3/dingtalk.open.js';
+    script.onload = function() {
+      console.log('[钉钉] dingtalk-jsapi SDK 加载完成');
+      if (window.dd && window.dd.config) {
+        console.log('[钉钉] dd 对象已注入，继续初始化...');
+        runDingTalkInit();
+      } else {
+        console.warn('[钉钉] SDK 加载完成但 dd 仍未注入，可能是非标准容器');
       }
-
-      // 2) dd.config
-      dd.config({
-        agentId: cfg.agentId,
-        corpId: cfg.corpId,
-        timeStamp: cfg.timeStamp,
-        nonceStr: cfg.nonceStr,
-        signature: cfg.signature,
-        type: 0,
-        jsApiList: [
-          'runtime.permission.requestAuthCode',
-          'biz.contact.chooseMobileContacts',
-          'device.notification.alert',
-          'biz.navigation.setTitle',
-        ]
-      });
-
-      // 3) dd.ready
-      dd.ready(function() {
-        console.log('[钉钉] JSAPI 初始化成功');
-
-        // 设置导航标题
-        dd.biz.navigation.setTitle({ title: '学习报告生成器' });
-
-        // 4) 拿免登授权码
-        const authCodeDeadline = Date.now() + 8000; // 8 秒超时（钉钉容器内通常 < 1 秒）
-        let authCodeTimer = setTimeout(() => {
-          if (!window._ddAuthCode) {
-            console.error('[钉钉] requestAuthCode 8 秒未回调，疑似钉钉版本过旧或 corpId 不匹配');
-            // 在 UI 顶部显式提示
-            const hint = document.createElement('div');
-            hint.id = '_ddAuthHint';
-            hint.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#fff3cd;color:#856404;padding:10px;text-align:center;z-index:99999;font-size:13px;border-bottom:2px solid #ffc107';
-            hint.innerHTML = '⚠️ 钉钉免登录未生效（8 秒内未拿到 authCode）。请在钉钉里打开（不是普通浏览器），并确认应用 corpId 正确。关闭后重试。 <a href="javascript:void(0)" onclick="this.parentElement.remove();location.reload()">点此重试</a>';
-            document.body.appendChild(hint);
-          }
-        }, 8000);
-        dd.runtime.permission.requestAuthCode({
+    };
+    script.onerror = function() {
+      console.error('[钉钉] dingtalk-jsapi SDK 加载失败');
+    };
+    document.head.appendChild(script);
+    return;
+  }
+  // dd 存在，直接执行初始化
+  runDingTalkInit();
+  function runDingTalkInit() {
+    const dd = (typeof dd !== 'undefined' && dd) || window.dd;
+    if (!dd || !dd.config) {
+      console.warn('[钉钉] 初始化时 dd 对象仍不存在');
+      return;
+    }
+    const proxyBase = getKBProxy();
+    if (!proxyBase) {
+      console.warn('[钉钉] 代理 URL 未配置，跳过 dd.config');
+      return;
+    }
+    // 1) 向后端请求签名
+    const signUrl = proxyBase.replace(/\/api\/proxy$/, '/api/dd-sign');
+    fetch(signUrl + '?url=' + encodeURIComponent(location.href.split('#')[0]))
+      .then(r => r.json())
+      .then(cfg => {
+        if (!cfg.ok || !cfg.signature) {
+          console.warn('[钉钉] 签名获取失败：', cfg.errmsg || '未知错误');
+          return;
+        }
+        // 2) dd.config
+        dd.config({
+          agentId: cfg.agentId,
           corpId: cfg.corpId,
-          onSuccess: function(result) {
-            clearTimeout(authCodeTimer);
-            window._ddAuthCode = result.code;
-            console.log('[钉钉] 免登授权码已获取, code=' + (result.code || '').slice(0, 8) + '...');
-            // 清除顶部提示
-            const oldHint = document.getElementById('_ddAuthHint');
-            if (oldHint) oldHint.remove();
-            // ★ 立刻用 authCode 调 whoami 拿 userid，缓存到 localStorage
-            // 后续 listTables / query 自动从 localStorage 取，不再需要 operatorId
-            fetch(proxyBase + (proxyBase.includes('?') ? '&' : '?') + 'action=whoami', {
-              method: 'GET',
-              headers: { 'x-dd-authcode': result.code },
-            })
-            .then(r => r.json())
-            .then(w => {
-              if (w && w.userId) {
-                localStorage.setItem('dtkb_userid', w.userId);
-                console.log('[钉钉] userid 已缓存：', w.userId, 'corpId=' + w.corpId);
-                if (w.corpId && w.corpId !== cfg.corpId) {
-                  console.warn('[钉钉] corpId 不一致：dd.config=' + cfg.corpId + ' / whoami=' + w.corpId);
-                }
-              } else {
-                console.warn('[钉钉] whoami 失败：', w?.errmsg);
-              }
-            })
-            .catch(err => console.warn('[钉钉] whoami 请求失败：', err));
-          },
-          onFail: function(err) {
-            console.warn('[钉钉] 获取授权码失败：', JSON.stringify(err));
-            // 不影响使用，KB 代理会回退到 agentSecret 模式
-          }
+          timeStamp: cfg.timeStamp,
+          nonceStr: cfg.nonceStr,
+          signature: cfg.signature,
+          type: 0,
+          jsApiList: [
+            'runtime.permission.requestAuthCode',
+            'biz.contact.chooseMobileContacts',
+            'device.notification.alert',
+            'biz.navigation.setTitle',
+          ]
         });
-      });      // dd.error
-      dd.error(function(err) {
-        console.error('[钉钉] dd.config 错误：', JSON.stringify(err));
+        // 3) dd.ready
+        dd.ready(function() {
+          console.log('[钉钉] JSAPI 初始化成功');
+          // 设置导航标题
+          dd.biz.navigation.setTitle({ title: '学习报告生成器' });
+          // 4) 拿免登授权码
+          const authCodeDeadline = Date.now() + 8000; // 8 秒超时（钉钉容器内通常 < 1 秒）
+          let authCodeTimer = setTimeout(() => {
+            if (!window._ddAuthCode) {
+              console.error('[钉钉] requestAuthCode 8 秒未回调，疑似钉钉版本过旧或 corpId 不匹配');
+              // 在 UI 顶部显式提示
+              const hint = document.createElement('div');
+              hint.id = '_ddAuthHint';
+              hint.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#fff3cd;color:#856404;padding:10px;text-align:center;z-index:99999;font-size:13px;border-bottom:2px solid #ffc107';
+              hint.innerHTML = '⚠️ 钉钉免登录未生效（8 秒内未拿到 authCode）。请在钉钉里打开（不是普通浏览器），并确认应用 corpId 正确。关闭后重试。 <a href="javascript:void(0)" onclick="this.parentElement.remove();location.reload()">点此重试</a>';
+              document.body.appendChild(hint);
+            }
+          }, 8000);
+          dd.runtime.permission.requestAuthCode({
+            corpId: cfg.corpId,
+            onSuccess: function(result) {
+              clearTimeout(authCodeTimer);
+              window._ddAuthCode = result.code;
+              console.log('[钉钉] 免登授权码已获取, code=' + (result.code || '').slice(0, 8) + '...');
+              // 清除顶部提示
+              const oldHint = document.getElementById('_ddAuthHint');
+              if (oldHint) oldHint.remove();
+              // ★ 立刻用 authCode 调 whoami 拿 userid，缓存到 localStorage
+              // 后续 listTables / query 自动从 localStorage 取，不再需要 operatorId
+              fetch(proxyBase + (proxyBase.includes('?') ? '&' : '?') + 'action=whoami', {
+                method: 'GET',
+                headers: { 'x-dd-authcode': result.code },
+              })
+              .then(r => r.json())
+              .then(w => {
+                if (w && w.userId) {
+                  localStorage.setItem('dtkb_userid', w.userId);
+                  console.log('[钉钉] userid 已缓存：', w.userId, 'corpId=' + w.corpId);
+                  if (w.corpId && w.corpId !== cfg.corpId) {
+                    console.warn('[钉钉] corpId 不一致：dd.config=' + cfg.corpId + ' / whoami=' + w.corpId);
+                  }
+                } else {
+                  console.warn('[钉钉] whoami 失败：', w?.errmsg);
+                }
+              })
+              .catch(err => console.warn('[钉钉] whoami 请求失败：', err));
+            },
+            onFail: function(err) {
+              console.warn('[钉钉] 获取授权码失败：', JSON.stringify(err));
+              // 不影响使用，KB 代理会回退到 agentSecret 模式
+            }
+          });
+        });      // dd.error
+        dd.error(function(err) {
+          console.error('[钉钉] dd.config 错误：', JSON.stringify(err));
+        });
+      })
+      .catch(err => {
+        console.error('[钉钉] 签名请求失败：', err);
       });
-    })
-    .catch(err => {
-      console.error('[钉钉] 签名请求失败：', err);
-    });
+  }
 })();
 
 // 🆕 手动输入 corpId + agentId 兜底（钉钉 PC 客户端 dd 对象未注入时）
